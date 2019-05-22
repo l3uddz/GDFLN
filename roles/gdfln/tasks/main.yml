@@ -162,6 +162,48 @@
           ternary("https://gdfln-daemon." + basics.domain|trim,"http://gdfln-daemon." + basics.domain|trim + ":9474") }}'}
     when: ('gdfln_reauth' not in ansible_run_tags)
 
+  - name: Set 'teamdrives_enabled' variable
+    set_fact:
+      teamdrives_enabled: "{{ true if not(
+          (google.teamdrives is undefined)
+          or
+          (google.teamdrives is none)
+          or
+          (google.teamdrives | trim | length == 0)
+          )
+          else false }}"
+    when: ('gdfln_reauth' not in ansible_run_tags)
+
+  - name: "Teamdrive disabled config"
+    shell: >
+      APP_PATH='/opt/gdfln'
+
+      jq -c '.google.teamdrive = false'
+      ${APP_PATH}/config.json | jq . >
+      ${APP_PATH}/tmp.$$.json && mv ${APP_PATH}/tmp.$$.json ${APP_PATH}/config.json
+    when:
+      - ('gdfln_reauth' not in ansible_run_tags)
+      - not (teamdrives_enabled)
+
+  - name: "Teamdrive enabled config"
+    block:
+
+    - name: Set 'teamdrives_list' variable
+      set_fact:
+        teamdrives_list: "{{ (google.teamdrives | default('',true) ).split(',') | map('trim') | list }}"
+
+    - name: "Add teamdrives into 'config.json'"
+      shell: >
+        APP_PATH='/opt/gdfln'
+
+        jq -c '.google.teamdrive = true | .google.teamdrives = {{ teamdrives_list | to_json }}'
+        ${APP_PATH}/config.json | jq . >
+        ${APP_PATH}/tmp.$$.json && mv ${APP_PATH}/tmp.$$.json ${APP_PATH}/config.json
+
+    when:
+      - ('gdfln_reauth' not in ansible_run_tags)
+      - (teamdrives_enabled)
+
   - name: "Retrieve authorization link"
     docker_container:
       name: gdfln_daemon

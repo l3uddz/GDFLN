@@ -17,6 +17,7 @@ web:
 google:
   client_id:
   client_secret:
+  teamdrives:
 cloudflare:
   email:
   api:
