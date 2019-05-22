@@ -1,0 +1,305 @@
+#########################################################################
+# Title:         GDFLN: GDFLN Daemon & Web                              #
+# Author(s):     desimaniac, l3udd                                      #
+# URL:           https://github.com/cloudbox/cloudbox                   #
+# --                                                                    #
+#         Part of the Cloudbox project: https://cloudbox.works          #
+#########################################################################
+#                   GNU General Public License v3.0                     #
+#########################################################################
+---
+- name: Install common packages
+  apt:
+    state: present
+    name:
+      - jq
+  become: yes
+
+- name: "Set DNS Record on CloudFlare"
+  include_role:
+    name: cloudflare
+  vars:
+    subdomain: "{{ item }}"
+  with_items:
+    - "gdfln-daemon"
+    - "gdfln"
+  when: true if not(
+        (cloudflare.api is undefined)
+        or
+        (cloudflare.api is none)
+        or
+        (cloudflare.api | trim | length == 0)
+      )
+      else false
+
+- name: "Get 'playbook.yml' info."
+  stat:
+    path: "{{ playbook_dir }}/playbook.yml"
+  register: playbook_yml
+
+- name: Set user variables
+  set_fact:
+    user: "{{ playbook_yml.stat.pw_name }}"
+    group: "{{ playbook_yml.stat.gr_name }}"
+    uid: "{{ playbook_yml.stat.uid }}"
+    gid: "{{ playbook_yml.stat.gid }}"
+
+- name: "Create gdfln directories"
+  file: "path={{ item }} state=directory owner={{ user }} group={{ group }} mode=0775"
+  with_items:
+    - "/opt/gdfln"
+    - "/mnt/local/downloads/gdfln/Movies"
+    - "/mnt/local/downloads/gdfln/TV"
+  become: yes
+
+- name: Stop and remove any existing container
+  docker_container:
+    name: "{{ item }}"
+    state: absent
+  with_items:
+    - "gdfln_daemon"
+    - "gdfln_web"
+
+- name: "Delete existing files"
+  file: "path={{ item }} state=absent"
+  with_items:
+    - "/opt/gdfln/activity.log"
+    - "/opt/gdfln/config.json"
+    - "/opt/gdfln/vault.db"
+  when: ('gdfln_clean' in ansible_run_tags)
+
+- name: Log into docker registry
+  docker_login:
+    registry: registry.bytecloud.app/gdfln
+    username: "{{ registry.user }}"
+    password: "{{ registry.pass }}"
+    reauthorize: yes
+
+- name: "Pull Daemon image"
+  docker_image:
+    name: "registry.bytecloud.app/gdfln/daemon:{{ registry.version.daemon }}"
+    pull: yes
+    force: yes
+
+- name: "Pull Web image"
+  docker_image:
+    name: "registry.bytecloud.app/gdfln/web:{{ registry.version.web }}"
+    pull: yes
+    force: yes
+
+- name: Set 'gdfln_web_daemon' variable
+  set_fact:
+    gdfln_env_daemon:
+      PUID: "{{ uid }}"
+      PGID: "{{ gid }}"
+
+- name: "Set 'cloudbox_label' variable"
+  set_fact:
+    cloudbox_label:
+      "com.github.cloudbox.cloudbox_managed": "true"
+
+- name: "Set cloudbox-related variables for gdfln_daemon"
+  set_fact:
+    cloudbox_network_daemon:
+      - name: cloudbox
+        aliases:
+          - gdfln_daemon
+    cloudbox_env_daemon:
+      VIRTUAL_HOST: "gdfln-daemon.{{ basics.domain }}"
+      VIRTUAL_PORT: 9474
+      LETSENCRYPT_HOST: "gdfln-daemon.{{ basics.domain }}"
+      LETSENCRYPT_EMAIL: "{{ cloudflare.email }}"
+      HTTPS_METHOD: noredirect
+
+- name: "Check if 'config.json' exists"
+  stat:
+    path: "/opt/gdfln/config.json"
+  register: config_json
+
+- name: Do the following tasks when 'config.json' does not exist.
+  block:
+
+  - name: "Generate 'config.json'"
+    docker_container:
+      name: gdfln_daemon
+      image: "registry.bytecloud.app/gdfln/daemon:{{ registry.version.daemon }}"
+      pull: no
+      detach: no
+      keep_volumes: no
+      cleanup: yes
+      env: "{{ (gdfln_env_daemon) | combine({'GDFLN_CMD': 'dump-env —env-path /dev/null'}) }}"
+      volumes:
+        - "/etc/localtime:/etc/localtime:ro"
+        - "/opt/gdfln:/config"
+      networks:
+        - name: cloudbox
+          aliases:
+            - gdfln_daemon
+      purge_networks: yes
+      state: started
+    register: generate_config
+    failed_when: (generate_config.status is defined) and (generate_config.status == 1)
+
+  - name: "Add client/secret into 'config.json'"
+    shell: >
+      APP_PATH='/opt/gdfln'
+
+      jq -c '{{ item.key }} = "{{ item.value }}"'
+      ${APP_PATH}/config.json | jq . >
+      ${APP_PATH}/tmp.$$.json && mv ${APP_PATH}/tmp.$$.json ${APP_PATH}/config.json
+    loop:
+      - {key: '.google.client_id', value: '{{ google.client_id }}'}
+      - {key: '.google.client_secret', value: '{{ google.client_secret }}'}
+      - {key: '.hub.username', value: '{{ hub.user }}'}
+      - {key: '.hub.password', value: '{{ hub.pass }}'}
+      - {key: '.api.public_url', value: '{{ (basics.cloudbox) |
+          ternary("https://gdfln-daemon." + basics.domain|trim,"http://gdfln-daemon." + basics.domain|trim + ":9474") }}'}
+    when: ('gdfln_reauth' not in ansible_run_tags)
+
+  - name: "Retrieve authorization link"
+    docker_container:
+      name: gdfln_daemon
+      image: "registry.bytecloud.app/gdfln/daemon:{{ registry.version.daemon }}"
+      pull: no
+      detach: no
+      keep_volumes: no
+      cleanup: yes
+      env: "{{ (gdfln_env_daemon) | combine({'GDFLN_CMD': 'authorize -l'}) }}"
+      volumes:
+        - "/etc/localtime:/etc/localtime:ro"
+        - "/opt/gdfln:/config"
+      state: started
+    register: authorization_link_temp
+    failed_when: (authorization_link_temp.status is defined) and (authorization_link_temp.status == 1)
+
+  - name: Set 'authorization_link' variable
+    set_fact:
+      authorization_link: "{{ ((authorization_link_temp.ansible_facts.docker_container.Output)
+        if (authorization_link_temp.ansible_facts is defined)
+        else (authorization_link_temp.msg)) | trim | regex_search('(https://[^ ]*)\\n') | trim }}"
+
+  - name: "Failed to generate authorization link"
+    fail:
+      debug: "Failed to generate authorization link"
+    when: (authorization_link | length == 0)
+
+  - name: "Display Authorization Link"
+    debug:
+      msg: "{{ authorization_link }}"
+
+  - name: "Authorization Code"
+    pause:
+      prompt: "Please visit the above link, retrive the authorization code, and enter it below"
+    register: authorization_code_temp
+
+  - name: Set 'authorization_code' variable
+    set_fact:
+      authorization_code: "{{ authorization_code_temp.user_input | trim }}"
+
+  - name: "Exchange authorization code for token"
+    docker_container:
+      name: gdfln_daemon
+      image: "registry.bytecloud.app/gdfln/daemon:{{ registry.version.daemon }}"
+      pull: no
+      detach: no
+      keep_volumes: no
+      cleanup: yes
+      env: "{{ (gdfln_env_daemon) | combine({'GDFLN_CMD': '-vvv authorize -c' + authorization_code }) }}"
+      volumes:
+        - "/etc/localtime:/etc/localtime:ro"
+        - "/opt/gdfln:/config"
+      state: started
+    register: token_exchange
+    failed_when: (token_exchange.status is defined) and (token_exchange.status == 1)
+
+  - name: Set 'token_auth_code_regex' variable
+    set_fact:
+        token_auth_code_regex: auth_code\:\s*'([^']*)
+
+  - name: Set 'token_auth_code' variable
+    set_fact:
+      token_auth_code: "{{ (((token_exchange.ansible_facts.docker_container.Output)
+        if (token_exchange.ansible_facts is defined)
+        else (token_exchange.msg)) | trim | regex_search(token_auth_code_regex, '\\1'))[0] }}"
+
+  - name: Fail when authorization code doesnt match
+    fail:
+      msg: "Authorization code validation failed."
+    when: not (authorization_code == token_auth_code)
+
+  when: ('gdfln_reauth' in ansible_run_tags) or (not config_json.stat.exists)
+
+- name: "Create daemon container"
+  docker_container:
+    name: gdfln_daemon
+    image: "registry.bytecloud.app/gdfln/daemon:{{ registry.version.daemon }}"
+    pull: no
+    published_ports:
+      - "9474:9474/tcp"
+    env: "{{ (basics.cloudbox) | ternary(gdfln_env_daemon|combine(cloudbox_env_daemon),gdfln_env_daemon) }}"
+    volumes:
+      - "/etc/localtime:/etc/localtime:ro"
+      - "/opt/gdfln:/config"
+      - "/mnt:/mnt"
+    labels: "{{ (basics.cloudbox) | ternary(cloudbox_label,omit) }}"
+    networks: "{{ (basics.cloudbox) | ternary(cloudbox_network_daemon,omit) }}"
+    purge_networks: "{{ (basics.cloudbox) }}"
+    restart_policy: unless-stopped
+    state: started
+  register: started_daemon
+
+- name: Create htpasswd
+  htpasswd:
+    path: "/opt/nginx-proxy/htpasswd/gdfln.{{ basics.domain }}"
+    name: "{{ web.user }}"
+    password: "{{ web.pass }}"
+    owner: "{{ user }}"
+    group: "{{ group }}"
+    mode: 0664
+  when: (basics.cloudbox)
+
+- name: "Get 'api_key' from 'config.json'"
+  shell: jq -rc '.api.api_key' '/opt/gdfln/config.json'
+  register: config_json_api_key
+
+- name: "Get 'public_url' from 'config.json'"
+  shell: jq -rc '.api.public_url' '/opt/gdfln/config.json'
+  register: config_json_public_url
+
+- name: Set 'gdfln_env_web' variable
+  set_fact:
+    gdfln_env_web:
+      PUID: "{{ uid }}"
+      PGID: "{{ gid }}"
+      VUE_APP_HUB_USERNAME: "{{ hub.user }}"
+      VUE_APP_HUB_PASSWORD: "{{ hub.pass }}"
+      VUE_APP_API_LINK: "{{ config_json_public_url.stdout }}/{{ config_json_api_key.stdout }}"
+
+- name: "Set cloudbox-related variables for gdfln_web"
+  set_fact:
+    cloudbox_network_web:
+      - name: cloudbox
+        aliases:
+          - gdfln_web
+    cloudbox_env_web:
+      VIRTUAL_HOST: "gdfln.{{ basics.domain }}"
+      VIRTUAL_PORT: 8080
+      LETSENCRYPT_HOST: "gdfln.{{ basics.domain }}"
+      LETSENCRYPT_EMAIL: "{{ cloudflare.email }}"
+
+- name: "Create web container"
+  docker_container:
+    name: gdfln_web
+    image: "registry.bytecloud.app/gdfln/web:{{ registry.version.web }}"
+    pull: no
+    published_ports:
+      - "127.0.0.1:4637:8080/tcp"
+    env: "{{ (basics.cloudbox) | ternary(gdfln_env_web|combine(cloudbox_env_web),gdfln_env_web) }}"
+    volumes:
+      - "/etc/localtime:/etc/localtime:ro"
+    labels: "{{ (basics.cloudbox) | ternary(cloudbox_label,omit) }}"
+    networks: "{{ (basics.cloudbox) | ternary(cloudbox_network_web,omit) }}"
+    purge_networks: "{{ (basics.cloudbox) }}"
+    restart_policy: unless-stopped
+    state: started
+  register: started_web

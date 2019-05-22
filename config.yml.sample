@@ -1,0 +1,22 @@
+---
+basics:
+  domain:
+  cloudbox: false
+registry:
+  user:
+  pass:
+  version:
+    daemon: latest
+    web: latest
+hub:
+  user:
+  pass:
+web:
+  user:
+  pass:
+google:
+  client_id:
+  client_secret:
+cloudflare:
+  email:
+  api:

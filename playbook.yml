@@ -1,0 +1,6 @@
+---
+- hosts: localhost
+  vars_files:
+    - ['config.yml', 'config.yml.sample']
+  roles:
+    - { role: gdfln, tags: ['gdfln', 'gdfln_reauth', 'gdfln_clean'] }
