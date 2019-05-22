@@ -3,4 +3,4 @@
   vars_files:
     - ['config.yml', 'config.yml.sample']
   roles:
-    - { role: gdfln, tags: ['gdfln', 'gdfln_reauth', 'gdfln_clean'] }
+    - { role: gdfln, tags: ['gdfln', 'gdfln_reauth', 'gdfln_config', 'gdfln_clean'] }

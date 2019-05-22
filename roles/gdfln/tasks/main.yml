@@ -63,6 +63,12 @@
 - name: "Delete existing files"
   file: "path={{ item }} state=absent"
   with_items:
+    - "/opt/gdfln/config.json"
+  when: ('gdfln_config' in ansible_run_tags)
+
+- name: "Delete existing files"
+  file: "path={{ item }} state=absent"
+  with_items:
     - "/opt/gdfln/activity.log"
     - "/opt/gdfln/config.json"
     - "/opt/gdfln/vault.db"
@@ -140,7 +146,7 @@
     register: generate_config
     failed_when: (generate_config.status is defined) and (generate_config.status == 1)
 
-  - name: "Add client/secret into 'config.json'"
+  - name: "Add basic config into 'config.json'"
     shell: >
       APP_PATH='/opt/gdfln'
 
