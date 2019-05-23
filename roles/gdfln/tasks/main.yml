@@ -296,9 +296,14 @@
     state: started
   register: started_daemon
 
+- name: Remove existing htpasswd
+  file: "path=/opt/nginx-proxy/htpasswd/gdfln.{{ basics.domain }} state=absent"
+
 - name: Create htpasswd
   htpasswd:
     path: "/opt/nginx-proxy/htpasswd/gdfln.{{ basics.domain }}"
+    state: present
+    create: yes
     name: "{{ web.user }}"
     password: "{{ web.pass }}"
     owner: "{{ user }}"
